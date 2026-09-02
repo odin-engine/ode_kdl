@@ -11,6 +11,8 @@
 package kdl_tests
 
 // Core
+    import "core:fmt"
+    import "core:strings"
     import "core:testing"
 
 // ODE
@@ -125,4 +127,83 @@ parse_error_is_reported_and_terminal :: proc(t: ^testing.T) {
     msg, msg_ok := ev.value.variant.(string)
     testing.expect(t, msg_ok)
     testing.expect(t, len(msg) > 0)
+}
+
+@(test)
+streaming_matches_string_mode :: proc(t: ^testing.T) {
+    doc := "node1 \"arg\" prop=42 (Type)child {\n    inner \"nested string\"\n}\n"
+
+    parser_str: kdl.Parser
+    kdl.init(&parser_str, doc)
+    defer kdl.destroy(&parser_str)
+
+    reader := chunked_reader_make(doc, 1)
+    parser_stream: kdl.Parser
+    err := kdl.init(&parser_stream, chunked_reader_to_reader(&reader))
+    testing.expect(t, err == nil)
+    defer kdl.destroy(&parser_stream)
+
+    for {
+        ev_str := kdl.next_event(&parser_str)
+        ev_stream := kdl.next_event(&parser_stream)
+        testing.expect_value(t, ev_stream.type, ev_str.type)
+        testing.expect_value(t, ev_stream.name, ev_str.name)
+        testing.expect_value(t, ev_stream.commented_out, ev_str.commented_out)
+        testing.expect_value(t, ev_stream.value, ev_str.value)
+        if ev_str.type == .EOF || ev_str.type == .Parse_Error do break
+    }
+}
+
+// Forces a 2-byte UTF-8 rune ('é') across a chunk boundary, exercising Codepoint_Status.Incomplete.
+@(test)
+streaming_splits_multibyte_rune_across_reads :: proc(t: ^testing.T) {
+    doc := "café\n"
+
+    reader := chunked_reader_make(doc, 1)
+    parser: kdl.Parser
+    err := kdl.init(&parser, chunked_reader_to_reader(&reader))
+    testing.expect(t, err == nil)
+    defer kdl.destroy(&parser)
+
+    ev := kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.Start_Node)
+    testing.expect_value(t, ev.name, "café")
+
+    ev = kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.End_Node)
+
+    ev = kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.EOF)
+}
+
+// A single string argument spans many tokenizer__grow calls; kdl.compact between events
+// proves compaction right before/after a big scan doesn't disturb it.
+@(test)
+long_token_survives_growth_and_manual_compaction :: proc(t: ^testing.T) {
+    inner := strings.repeat("x", 5000)
+    defer delete(inner)
+    doc := fmt.tprintf("node \"%s\"\n", inner)
+
+    reader := chunked_reader_make(doc, 4)
+    parser: kdl.Parser
+    err := kdl.init(&parser, chunked_reader_to_reader(&reader))
+    testing.expect(t, err == nil)
+    defer kdl.destroy(&parser)
+
+    ev := kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.Start_Node)
+    kdl.compact(&parser)
+
+    ev = kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.Argument)
+    s, s_ok := ev.value.variant.(string)
+    testing.expect(t, s_ok)
+    testing.expect_value(t, len(s), 5000)
+    kdl.compact(&parser)
+
+    ev = kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.End_Node)
+
+    ev = kdl.next_event(&parser)
+    testing.expect_value(t, ev.type, kdl.Event_Type.EOF)
 }

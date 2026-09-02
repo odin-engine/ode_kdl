@@ -3,14 +3,20 @@
     Original C implementation Copyright (c) Thomas Jollans (MIT License)
 
     Emitter — formats KDL v2 events back into document text. Ported from
-    ckdl's src/emitter.c, buffering-only (no kdl_write_func streaming
-    variant, see CLAUDE.md) and v2-only (always emits #null/#true/#false,
-    always prefers bare identifiers per KDL v2 rules).
+    ckdl's src/emitter.c, v2-only (always emits #null/#true/#false, always
+    prefers bare identifiers per KDL v2 rules).
+
+    Buffering mode (emitter__init) and streaming mode (emitter__init_stream)
+    both write through the same self.writer: io.Writer field — buffering mode
+    just points it at self.buf via strings.to_writer. Because of that, an
+    Emitter must never be moved after init; self.writer in buffering mode
+    holds a pointer into the same struct it lives in.
 */
 package kdl
 
 // Core
     import "base:runtime"
+    import "core:io"
     import "core:math"
     import "core:strconv"
     import "core:strings"
@@ -61,6 +67,8 @@ package kdl
         opt:           Emitter_Options,
         depth:         int,
         start_of_line: bool,
+        writer:        io.Writer,
+        buffering:     bool, // true: buf owns storage and get_buffer is valid; false: writer is caller-supplied
         buf:           strings.Builder,
         allocator:     runtime.Allocator,
     }
@@ -70,13 +78,23 @@ package kdl
         self.allocator = allocator
         self.opt = opt
         self.start_of_line = true
-        _, err := strings.builder_init(&self.buf, allocator)
-        return err
+        self.buffering = true
+        _ = strings.builder_init(&self.buf, allocator) or_return
+        self.writer = strings.to_writer(&self.buf)
+        return nil
+    }
+
+    emitter__init_stream :: proc(self: ^Emitter, writer: io.Writer, opt: Emitter_Options = DEFAULT_EMITTER_OPTIONS, allocator := context.allocator) {
+        self^ = Emitter{}
+        self.allocator = allocator // still needed: escape()/float_to_string() allocate scratch buffers regardless of output mode
+        self.opt = opt
+        self.start_of_line = true
+        self.writer = writer
     }
 
     emitter__destroy :: proc(self: ^Emitter) {
         _ = emitter__emit_end(self)
-        strings.builder_destroy(&self.buf)
+        if self.buffering do strings.builder_destroy(&self.buf)
         self^ = Emitter{}
     }
 
@@ -130,7 +148,7 @@ package kdl
         return true
     }
 
-    // Get a reference to the current emitter buffer. Invalidated by any further emit_* call.
+    // Buffering mode only. Invalidated by any further emit_* call.
     emitter__get_buffer :: proc(self: ^Emitter) -> string {
         return strings.to_string(self.buf)
     }
@@ -140,7 +158,8 @@ package kdl
 
     @(private)
     emitter__write_str :: proc(self: ^Emitter, s: string) -> bool {
-        return strings.write_string(&self.buf, s) == len(s)
+        n, err := io.write_string(self.writer, s)
+        return err == nil && n == len(s)
     }
 
     @(private)

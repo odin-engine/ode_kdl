@@ -9,9 +9,15 @@
     `Tokenizer`/`Parser`/`Emitter` typename__action procedures defined in
     tokenizer.odin, parser.odin, and emitter.odin. See CLAUDE.md for the
     architecture and the deliberate differences from upstream ckdl (v2
-    only, string input only, no CLI/bindings).
+    only, no CLI/bindings beyond kdl-cat).
 */
 package kdl
+
+///////////////////////////////////////////////////////////////////////////////
+// Defines
+
+    // Bytes read per tokenizer__grow call in stream mode.
+    STREAM_REFILL_SIZE :: #config(KDL_STREAM_REFILL_SIZE, 4096)
 
 ///////////////////////////////////////////////////////////////////////////////
 // Aliases
@@ -44,11 +50,28 @@ package kdl
     //
         init :: proc {
             tokenizer__init,
+            tokenizer__init_stream,
             parser__init,
+            parser__init_stream,
             emitter__init,
+            emitter__init_stream,
         }
 
         destroy :: proc {
+            tokenizer__destroy,
             parser__destroy,
             emitter__destroy,
+        }
+
+    //
+    // Stream buffer control - see tokenizer.odin. No-ops in string mode.
+    //
+        grow :: proc {
+            tokenizer__grow,
+            parser__grow,
+        }
+
+        compact :: proc {
+            tokenizer__compact,
+            parser__compact,
         }

@@ -79,6 +79,28 @@ kdl.emit_end(&emitter)
 fmt.println(kdl.get_buffer(&emitter))
 ```
 
+## Streaming
+
+`Tokenizer`/`Parser` can read from an `io.Reader` instead of a whole `string`, and `Emitter` can write to an `io.Writer` instead of building a `strings.Builder` — so a document never has to be fully in memory before parsing starts:
+
+```odin
+f, _ := os.open("big.kdl")
+defer os.close(f)
+
+parser: kdl.Parser
+kdl.init(&parser, os.to_reader(f))
+defer kdl.destroy(&parser)
+
+for {
+    ev := kdl.next_event(&parser)
+    if ev.type == .EOF || ev.type == .Parse_Error do break
+    // ... handle ev ...
+    kdl.compact(&parser) // optional: reclaim already-consumed buffer space
+}
+```
+
+The buffer only grows when parsing needs more bytes; it's never compacted on its own. Call `kdl.compact` yourself, whenever you judge it worthwhile, to bound memory — a caller who never calls it just gets a buffer that grows to hold the whole document. `kdl.grow` is also directly callable, e.g. to pre-fetch data before a burst of parsing. `emitter__init_stream`/`kdl.init(&emitter, some_writer)` works the same way for output.
+
 ## kdl-cat
 
 `kdl_cat/cat.odin` reformats a whole document to canonical form (properties de-duplicated and sorted lexically per node, matching ckdl's `ckdl-cat`), and ships as a small CLI:
@@ -90,7 +112,7 @@ odin build cmd/kdl_cat -out:cmd/kdl_cat/out/kdl_cat.exe -debug
 
 ## Scope
 
-This is a v2-only, string-input-only port of ckdl's core library — see `CLAUDE.md` for the full list of deliberate differences from upstream (no KDL v1, no streaming I/O, no C++/Python bindings).
+This is a v2-only port of ckdl's core library — see `CLAUDE.md` for the full list of deliberate differences from upstream (no KDL v1, no C++/Python bindings, no `ckdl-tokenize`/`ckdl-parse-events` CLI tools).
 
 ## Testing
 

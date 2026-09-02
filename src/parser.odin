@@ -3,8 +3,10 @@
     Original C implementation Copyright (c) Thomas Jollans (MIT License)
 
     Parser — a pull parser for KDL v2 documents. Ported from ckdl's
-    src/parser.c, string-input only (see CLAUDE.md) and v2-only (no
-    kdl_version detection/switching, no KDLv1 literals).
+    src/parser.c, v2-only (no kdl_version detection/switching, no KDLv1
+    literals). Supports both whole-string input (parser__init) and
+    streaming input from an io.Reader (parser__init_stream) — see
+    tokenizer.odin, which does all the actual streaming work.
 
     ckdl packs the state machine's "can this event happen here" flags as
     extra bits ORed onto a small base-state enum (PARSER_FLAG_* = 0x100,
@@ -21,6 +23,7 @@ package kdl
 
 // Core
     import "base:runtime"
+    import "core:io"
     import "core:math"
     import "core:strings"
 
@@ -106,12 +109,32 @@ package kdl
         self.child_block_at_depth = -1
     }
 
+    parser__init_stream :: proc(self: ^Parser, reader: io.Reader, emit_comments: bool = false, allocator := context.allocator) -> runtime.Allocator_Error {
+        self^ = Parser{}
+        self.allocator = allocator
+        tokenizer__init_stream(&self.tokenizer, reader, allocator) or_return
+        self.emit_comments = emit_comments
+        self.slashdash_depth = -1
+        self.child_block_at_depth = -1
+        return nil
+    }
+
     parser__destroy :: proc(self: ^Parser) {
         if len(self.tmp_string_type) > 0 do delete(self.tmp_string_type, self.allocator)
         if len(self.tmp_string_key) > 0 do delete(self.tmp_string_key, self.allocator)
         if len(self.tmp_string_value) > 0 do delete(self.tmp_string_value, self.allocator)
         if len(self.waiting_prop_name) > 0 do delete(self.waiting_prop_name, self.allocator)
+        tokenizer__destroy(&self.tokenizer)
         self^ = Parser{}
+    }
+
+    // Pre-fetch more data / reclaim already-consumed buffer space; see tokenizer.odin.
+    // No-ops in string mode.
+    parser__grow :: #force_inline proc(self: ^Parser) -> bool {
+        return tokenizer__grow(&self.tokenizer)
+    }
+    parser__compact :: #force_inline proc(self: ^Parser) {
+        tokenizer__compact(&self.tokenizer)
     }
 
     // Get the next parse event. The event (including any strings it references) is

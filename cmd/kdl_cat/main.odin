@@ -2,8 +2,8 @@
     2026 (c) Oleh, https://github.com/zm69
 
     kdl-cat CLI: reads a KDL v2 document (from a file argument, or stdin)
-    and writes it back out in canonical form. Thin wrapper over the
-    kdl_cat package; see kdl_cat/cat.odin for the actual logic.
+    and writes it back out in canonical form, streaming through both ends.
+    Thin wrapper over the kdl_cat package; see kdl_cat/cat.odin.
 */
 package main
 
@@ -15,29 +15,20 @@ package main
     import kdl_cat "../../kdl_cat"
 
 main :: proc() {
-    doc: []byte
-    err: os.Error
+    in_file := os.stdin
 
     if len(os.args) > 1 {
-        doc, err = os.read_entire_file_from_path(os.args[1], context.allocator)
+        f, err := os.open(os.args[1])
         if err != nil {
             fmt.eprintfln("Error opening file \"%s\": %v", os.args[1], err)
             os.exit(1)
         }
-    } else {
-        doc, err = os.read_entire_file_from_file(os.stdin, context.allocator)
-        if err != nil {
-            fmt.eprintfln("Error reading stdin: %v", err)
-            os.exit(1)
-        }
+        in_file = f
     }
-    defer delete(doc)
+    defer if in_file != os.stdin do os.close(in_file)
 
-    result, cat_ok := kdl_cat.cat(string(doc))
-    if !cat_ok {
+    ok := kdl_cat.cat_stream(os.to_reader(in_file), os.to_writer(os.stdout))
+    if !ok {
         os.exit(1)
     }
-    defer delete(result)
-
-    os.write_string(os.stdout, result)
 }

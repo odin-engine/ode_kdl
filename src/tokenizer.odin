@@ -3,16 +3,25 @@
     Original C implementation Copyright (c) Thomas Jollans (MIT License)
 
     Tokenizer — turns KDL v2 source text into a stream of tokens. Ported
-    from ckdl's src/tokenizer.c, string-input only (no kdl_read_func
-    streaming variant, see CLAUDE.md) and v2-only (no kdl_character_set,
-    no KDLv1 raw-string 'r"..."' prefix).
+    from ckdl's src/tokenizer.c, v2-only (no kdl_character_set, no KDLv1
+    raw-string 'r"..."' prefix).
 
-    Unlike ckdl's pointer-pair (cur/next) walk over a refillable buffer,
-    this port advances byte offsets/slices directly over the in-memory
-    document string — there's no buffer to refill, so no need to mirror
-    ckdl's _tok_get_char refill loop.
+    Supports both whole-string input (tokenizer__init) and streaming input
+    from an io.Reader (tokenizer__init_stream). Every scan position used
+    while popping one token is a byte offset *relative to self.pos* (the
+    start of that token), not an absolute buffer index — tokenizer__grow
+    never moves self.pos, and tokenizer__compact only ever drops bytes
+    before it, so a relative offset survives any number of grows/compactions
+    without the caller having to recompute it (unlike ckdl's own C, which
+    has to re-derive every raw pointer after each buffer refill).
 */
 package kdl
+
+// Base
+    import "base:runtime"
+
+// Core
+    import "core:io"
 
 ///////////////////////////////////////////////////////////////////////////////
 // Token
@@ -52,24 +61,62 @@ package kdl
 // Tokenizer
 
     Tokenizer :: struct {
-        remaining: string,
+        document:     []byte,        // string mode: the caller's string, reinterpreted; stream mode: owned_buffer[:]
+        pos:          int,           // start of the unconsumed region within document
+        reader:       io.Reader,     // zero Stream (procedure == nil) in string mode
+        owned_buffer: [dynamic]byte, // backing storage in stream mode; nil in string mode
+        allocator:    runtime.Allocator,
     }
 
     tokenizer__init :: proc(self: ^Tokenizer, document: string) {
-        self.remaining = document
+        self^ = Tokenizer{}
+        self.document = transmute([]byte)document
+        tokenizer__skip_bom(self)
+    }
 
-        // skip an initial BOM, if present
-        probe := document
-        c, status := pop_rune(&probe)
-        if status == .OK && c == 0xFEFF {
-            self.remaining = probe
-        }
+    tokenizer__init_stream :: proc(self: ^Tokenizer, reader: io.Reader, allocator := context.allocator) -> runtime.Allocator_Error {
+        self^ = Tokenizer{}
+        self.reader = reader
+        self.allocator = allocator
+        self.owned_buffer = make([dynamic]byte, 0, STREAM_REFILL_SIZE, allocator) or_return
+        self.document = self.owned_buffer[:]
+        tokenizer__skip_bom(self)
+        return nil
+    }
+
+    tokenizer__destroy :: proc(self: ^Tokenizer) {
+        if self.owned_buffer != nil do delete(self.owned_buffer)
+        self^ = Tokenizer{}
+    }
+
+    // Reads one more chunk via self.reader and appends it; never compacts. Returns false
+    // at true EOF (always false in string mode). Called automatically when a scan runs
+    // out of buffered bytes, and directly callable to pre-fetch data.
+    tokenizer__grow :: proc(self: ^Tokenizer) -> bool {
+        if self.reader.procedure == nil do return false
+
+        old_len := len(self.owned_buffer)
+        resize(&self.owned_buffer, old_len + STREAM_REFILL_SIZE)
+        n, _ := io.read(self.reader, self.owned_buffer[old_len:])
+        resize(&self.owned_buffer, old_len + max(n, 0))
+        self.document = self.owned_buffer[:]
+        return n > 0
+    }
+
+    // Drops the already-consumed prefix, reclaiming its memory. Never called
+    // automatically — safe to call any time between pop_token/next_event calls.
+    tokenizer__compact :: proc(self: ^Tokenizer) {
+        if self.owned_buffer == nil || self.pos == 0 do return
+
+        n := len(self.owned_buffer) - self.pos
+        copy(self.owned_buffer[:n], self.owned_buffer[self.pos:])
+        resize(&self.owned_buffer, n)
+        self.pos = 0
+        self.document = self.owned_buffer[:]
     }
 
     tokenizer__pop_token :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
-        start := self.remaining
-        cur := start
-        c, ustatus := pop_rune(&cur)
+        c, cur, ustatus := tokenizer__get_char(self, 0)
         switch ustatus {
         case .OK:
         case .EOF: return {}, .EOF
@@ -82,50 +129,39 @@ package kdl
 
         case is_whitespace(c):
             for {
-                save := cur
-                c2, s2 := pop_rune(&save)
+                c2, next2, s2 := tokenizer__get_char(self, cur)
                 if s2 != .OK || !is_whitespace(c2) do break
-                cur = save
+                cur = next2
             }
-            self.remaining = cur
-            return Token{type = .Whitespace, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Whitespace, value = tokenizer__take(self, cur)}, .OK
 
         case is_newline(c):
             if c == '\r' {
-                save := cur
-                c2, s2 := pop_rune(&save)
-                if s2 == .OK && c2 == '\n' do cur = save
+                c2, next2, s2 := tokenizer__get_char(self, cur)
+                if s2 == .OK && c2 == '\n' do cur = next2
             }
-            self.remaining = cur
-            return Token{type = .Newline, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Newline, value = tokenizer__take(self, cur)}, .OK
 
         case c == ';':
-            self.remaining = cur
-            return Token{type = .Semicolon, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Semicolon, value = tokenizer__take(self, cur)}, .OK
 
         case c == '\\':
-            self.remaining = cur
-            return Token{type = .Line_Continuation, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Line_Continuation, value = tokenizer__take(self, cur)}, .OK
 
         case c == '(':
-            self.remaining = cur
-            return Token{type = .Start_Type, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Start_Type, value = tokenizer__take(self, cur)}, .OK
 
         case c == ')':
-            self.remaining = cur
-            return Token{type = .End_Type, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .End_Type, value = tokenizer__take(self, cur)}, .OK
 
         case c == '{':
-            self.remaining = cur
-            return Token{type = .Start_Children, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Start_Children, value = tokenizer__take(self, cur)}, .OK
 
         case c == '}':
-            self.remaining = cur
-            return Token{type = .End_Children, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .End_Children, value = tokenizer__take(self, cur)}, .OK
 
         case c == '=':
-            self.remaining = cur
-            return Token{type = .Equals, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Equals, value = tokenizer__take(self, cur)}, .OK
 
         case c == '/':
             return tokenizer__pop_comment(self)
@@ -150,55 +186,85 @@ package kdl
 // Private
 
     @(private)
-    tokenizer__pop_word :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
-        start := self.remaining
-        cur := start
+    tokenizer__skip_bom :: proc(self: ^Tokenizer) {
+        c, next, status := tokenizer__get_char(self, 0)
+        if status == .OK && c == 0xFEFF do self.pos = next
+    }
+
+    // Byte-level, refill-aware "get next char" — the choke point every scan loop
+    // calls through. rel is relative to self.pos.
+    @(private)
+    tokenizer__get_char :: proc(self: ^Tokenizer, rel: int) -> (r: rune, next_rel: int, status: Utf8_Status) {
         for {
-            save := cur
-            c, s := pop_rune(&save)
+            r2, next_abs, cs := peek_codepoint(self.document, self.pos + rel)
+            switch cs {
+            case .OK:            return r2, next_abs - self.pos, .OK
+            case .Decode_Error:  return r2, next_abs - self.pos, .Decode_Error
+            case .EOF:
+                if !tokenizer__grow(self) do return 0, rel, .EOF
+            case .Incomplete:
+                if !tokenizer__grow(self) do return 0, rel, .Decode_Error
+            }
+        }
+    }
+
+    @(private)
+    tokenizer__slice :: #force_inline proc(self: ^Tokenizer, a: int, b: int) -> string {
+        return string(self.document[self.pos + a : self.pos + b])
+    }
+
+    // Slices document[0:rel] (relative to self.pos) and advances self.pos past it.
+    @(private)
+    tokenizer__take :: proc(self: ^Tokenizer, rel: int) -> string {
+        value := tokenizer__slice(self, 0, rel)
+        self.pos += rel
+        return value
+    }
+
+    @(private)
+    tokenizer__pop_word :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
+        cur := 0
+        for {
+            c, next, s := tokenizer__get_char(self, cur)
             if s == .EOF do break
             if s == .Decode_Error do return {}, .Error
             if is_end_of_word(c) do break
             if !is_word_char(c) do return {}, .Error
-            cur = save
+            cur = next
         }
-        self.remaining = cur
-        return Token{type = .Word, value = start[:len(start) - len(cur)]}, .OK
+        return Token{type = .Word, value = tokenizer__take(self, cur)}, .OK
     }
 
     @(private)
     tokenizer__pop_comment :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
-        start := self.remaining
-        cur := start
-        c1, s1 := pop_rune(&cur)
+        c1, after_slash, s1 := tokenizer__get_char(self, 0)
         if s1 != .OK do return {}, .Error
-        c2, s2 := pop_rune(&cur)
+        c2, after_c2, s2 := tokenizer__get_char(self, after_slash)
         if s2 != .OK do return {}, .Error
         assert(c1 == '/')
 
         switch c2 {
         case '-':
-            self.remaining = cur
-            return Token{type = .Slashdash, value = start[:2]}, .OK
+            return Token{type = .Slashdash, value = tokenizer__take(self, after_c2)}, .OK
 
         case '/':
+            cur := after_c2
             for {
-                save := cur
-                c, s := pop_rune(&save)
+                c, next, s := tokenizer__get_char(self, cur)
                 if s == .EOF do break
                 if s == .Decode_Error do return {}, .Error
                 if is_illegal_char(c) do return {}, .Error
                 if is_newline(c) do break
-                cur = save
+                cur = next
             }
-            self.remaining = cur
-            return Token{type = .Single_Line_Comment, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Single_Line_Comment, value = tokenizer__take(self, cur)}, .OK
 
         case '*':
+            cur := after_c2
             depth := 1
             prev_char: rune = 0
             for depth > 0 {
-                c, s := pop_rune(&cur)
+                c, next, s := tokenizer__get_char(self, cur)
                 if s != .OK do return {}, .Error // EOF or error inside a comment is always an error
                 if is_illegal_char(c) do return {}, .Error
                 if c == '*' && prev_char == '/' {
@@ -209,9 +275,9 @@ package kdl
                     c = 0 // "*/*" doesn't count as reopening
                 }
                 prev_char = c
+                cur = next
             }
-            self.remaining = cur
-            return Token{type = .Multi_Line_Comment, value = start[:len(start) - len(cur)]}, .OK
+            return Token{type = .Multi_Line_Comment, value = tokenizer__take(self, cur)}, .OK
 
         case:
             return {}, .Error
@@ -220,11 +286,10 @@ package kdl
 
     @(private)
     tokenizer__pop_string :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
-        document := self.remaining
         cur := 0
         is_raw := false
 
-        c, _, s := peek_rune(document, cur)
+        c, _, s := tokenizer__get_char(self, cur)
         if s != .OK do return {}, .Error
         switch c {
         case '#':
@@ -239,7 +304,7 @@ package kdl
         // count the hashes (raw strings only)
         hashes := 0
         for is_raw {
-            c2, next2, s2 := peek_rune(document, cur)
+            c2, next2, s2 := tokenizer__get_char(self, cur)
             if s2 != .OK do return {}, .Error // eof or error in a string is always an error
             if c2 == '#' {
                 hashes += 1
@@ -254,11 +319,11 @@ package kdl
         // count the opening quotes (1 = regular string, 3 = multi-line string)
         initial_quote_count := 0
         for initial_quote_count < 3 {
-            c3, next3, s3 := peek_rune(document, cur)
+            c3, next3, s3 := tokenizer__get_char(self, cur)
             if s3 == .EOF {
                 if !is_raw && initial_quote_count == 2 {
                     // "" followed immediately by EOF: an empty regular string
-                    self.remaining = document[cur:]
+                    self.pos += cur
                     return Token{type = .String, value = ""}, .OK
                 }
                 return {}, .Error
@@ -288,7 +353,7 @@ package kdl
         end_position := 0
 
         find_end: for {
-            c4, next4, s4 := peek_rune(document, cur)
+            c4, next4, s4 := tokenizer__get_char(self, cur)
             if s4 != .OK do return {}, .Error // eof or error in a string is always an error
 
             if is_illegal_char(c4) {
@@ -325,8 +390,8 @@ package kdl
             cur = next4
         }
 
-        value := document[string_start:end_quote_offset]
-        self.remaining = document[end_position:]
+        value := tokenizer__slice(self, string_start, end_quote_offset)
+        self.pos += end_position
 
         tok_type: Token_Type
         switch {

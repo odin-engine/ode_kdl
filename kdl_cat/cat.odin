@@ -14,6 +14,7 @@
 package kdl_cat
 
 // Core
+    import "core:io"
     import "core:slice"
     import "core:strings"
 
@@ -42,52 +43,23 @@ package kdl_cat
         if kdl.init(&emitter, opt.emitter_opt, allocator) != nil do return "", false
         defer kdl.destroy(&emitter)
 
-        in_node_list := true
-        props := make([dynamic]Prop, allocator)
-        defer delete(props)
+        if !cat_events(&parser, &emitter, allocator) do return "", false
+        return strings.clone(kdl.get_buffer(&emitter), allocator), true
+    }
 
-        for {
-            ev := kdl.next_event(&parser)
-            #partial switch ev.type {
-            case .EOF:
-                if !kdl.emit_end(&emitter) do return "", false
-                return strings.clone(kdl.get_buffer(&emitter), allocator), true
+    // Same as cat, but reads/writes incrementally via io.Reader/io.Writer instead of
+    // building the whole document/output in memory. Matches upstream ckdl-cat, which
+    // already streams. Call kdl.compact(&parser) between events to bound memory.
+    cat_stream :: proc(reader: io.Reader, writer: io.Writer, opt: Options = DEFAULT_OPTIONS, allocator := context.allocator) -> bool {
+        parser: kdl.Parser
+        if kdl.init(&parser, reader, false, allocator) != nil do return false
+        defer kdl.destroy(&parser)
 
-            case .Parse_Error:
-                return "", false
+        emitter: kdl.Emitter
+        kdl.init(&emitter, writer, opt.emitter_opt, allocator)
+        defer kdl.destroy(&emitter)
 
-            case .Start_Node:
-                if !in_node_list {
-                    if !emit_props(&emitter, &props) do return "", false
-                    if !kdl.start_emitting_children(&emitter) do return "", false
-                }
-                emitted: bool
-                if ta, has_ta := ev.value.type_annotation.?; has_ta {
-                    emitted = kdl.emit_node_with_type(&emitter, ta, ev.name)
-                } else {
-                    emitted = kdl.emit_node(&emitter, ev.name)
-                }
-                if !emitted do return "", false
-                in_node_list = false
-
-            case .End_Node:
-                if in_node_list {
-                    if !kdl.finish_emitting_children(&emitter) do return "", false
-                } else {
-                    if !emit_props(&emitter, &props) do return "", false
-                }
-                in_node_list = true
-
-            case .Argument:
-                if !kdl.emit_arg(&emitter, ev.value) do return "", false
-
-            case .Property:
-                append(&props, Prop{name = ev.name, value = ev.value})
-
-            case:
-                return "", false
-            }
-        }
+        return cat_events(&parser, &emitter, allocator)
     }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -97,6 +69,55 @@ package kdl_cat
     Prop :: struct {
         name:  string,
         value: kdl.Value,
+    }
+
+    @(private)
+    cat_events :: proc(parser: ^kdl.Parser, emitter: ^kdl.Emitter, allocator := context.allocator) -> bool {
+        in_node_list := true
+        props := make([dynamic]Prop, allocator)
+        defer delete(props)
+
+        for {
+            ev := kdl.next_event(parser)
+            #partial switch ev.type {
+            case .EOF:
+                return kdl.emit_end(emitter)
+
+            case .Parse_Error:
+                return false
+
+            case .Start_Node:
+                if !in_node_list {
+                    if !emit_props(emitter, &props) do return false
+                    if !kdl.start_emitting_children(emitter) do return false
+                }
+                emitted: bool
+                if ta, has_ta := ev.value.type_annotation.?; has_ta {
+                    emitted = kdl.emit_node_with_type(emitter, ta, ev.name)
+                } else {
+                    emitted = kdl.emit_node(emitter, ev.name)
+                }
+                if !emitted do return false
+                in_node_list = false
+
+            case .End_Node:
+                if in_node_list {
+                    if !kdl.finish_emitting_children(emitter) do return false
+                } else {
+                    if !emit_props(emitter, &props) do return false
+                }
+                in_node_list = true
+
+            case .Argument:
+                if !kdl.emit_arg(emitter, ev.value) do return false
+
+            case .Property:
+                append(&props, Prop{name = ev.name, value = ev.value})
+
+            case:
+                return false
+            }
+        }
     }
 
     // Emit properties in lexical order by name, keeping only the last occurrence
