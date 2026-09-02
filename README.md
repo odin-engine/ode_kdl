@@ -1,4 +1,4 @@
-# ode_kdl
+# ODE_KDL
 
 A [KDL v2](https://kdl.dev) document-language tokenizer, pull-parser, and emitter for Odin, ported from the C library [ckdl](https://github.com/tjol/ckdl).
 
