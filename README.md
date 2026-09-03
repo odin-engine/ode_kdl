@@ -110,9 +110,21 @@ odin build cmd/kdl_cat -out:cmd/kdl_cat/out/kdl_cat.exe -debug
 ./cmd/kdl_cat/out/kdl_cat.exe path/to/file.kdl
 ```
 
+## kdl-tokenize / kdl-parse-events
+
+`kdl_tokenize/tokenize.odin` dumps a document's raw token stream, and `kdl_parse_events/parse_events.odin` dumps its parser event stream — each as one KDL node per token/event, named after the Odin `Token_Type`/`Event_Type` enum case (e.g. `Word`, `Start_Node`), ported from ckdl's `ckdl-tokenize`/`ckdl-parse-events`:
+
+```sh
+odin build cmd/kdl_tokenize -out:cmd/kdl_tokenize/out/kdl_tokenize.exe -debug
+./cmd/kdl_tokenize/out/kdl_tokenize.exe path/to/file.kdl
+
+odin build cmd/kdl_parse_events -out:cmd/kdl_parse_events/out/kdl_parse_events.exe -debug
+./cmd/kdl_parse_events/out/kdl_parse_events.exe [-c] path/to/file.kdl
+```
+
 ## Scope
 
-This is a v2-only port of ckdl's core library — see `CLAUDE.md` for the full list of deliberate differences from upstream (no KDL v1, no C++/Python bindings, no `ckdl-tokenize`/`ckdl-parse-events` CLI tools).
+This is a v2-only port of ckdl's core library — see `CLAUDE.md` for the full list of deliberate differences from upstream (no KDL v1, no C++/Python bindings).
 
 ## Testing
 

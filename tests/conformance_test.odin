@@ -1,5 +1,6 @@
 /*
-    2026 (c) Oleh, https://github.com/zm69
+    Ported to Odin from ckdl (https://github.com/tjol/ckdl)
+    Original C implementation Copyright (c) Thomas Jollans (MIT License)
 
     Runs kdl_cat over the vendored upstream KDL 2.0.0 conformance corpus
     (tests/test_documents/upstream/2.0.0/{input,expected_kdl}, copied
