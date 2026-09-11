@@ -45,6 +45,7 @@ package kdl
         commented_out: bool, // this node/argument/property was commented out with /- (only set when emit_comments is on)
         name:          string, // node or property name
         value:         Value, // argument/property value; for Start_Node: null, possibly with a type annotation
+        location:      Location, // where the node, argument or property starts
     }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -97,6 +98,8 @@ package kdl
         waiting_prop_name:       string, // owned (moved out of tmp_string_value)
         next_token:              Token,
         have_next_token:         bool,
+        token_location:          Location, // start of the token being processed
+        waiting_prop_location:   Location, // start of waiting_prop_name
         allocator:               runtime.Allocator,
     }
 
@@ -149,12 +152,13 @@ package kdl
                 self.have_next_token = false
             } else {
                 tok, tstatus := tokenizer__pop_token(&self.tokenizer)
+                self.token_location = self.tokenizer.location
                 switch tstatus {
                 case .EOF:
                     if self.base_state == .In_Node {
                         // EOF may be ok, but we have to close the node first
                         self.flags -= {.Newlines_Are_Whitespace}
-                        token = Token{type = .Newline, value = ""}
+                        token = Token{type = .Newline, value = "", location = self.tokenizer.location}
                     } else if self.depth > 0 {
                         return parser__set_parse_error(self, "Unexpected end of data (unclosed lists of children)")
                     } else if self.slashdash_depth > 0 {
@@ -162,7 +166,7 @@ package kdl
                     } else if self.flags != {} {
                         return parser__set_parse_error(self, "Unexpected end of data")
                     } else {
-                        self.event = Event{type = .EOF}
+                        self.event = Event{type = .EOF, location = self.tokenizer.location}
                         return self.event
                     }
                 case .OK:
@@ -171,6 +175,8 @@ package kdl
                     return parser__set_parse_error(self, "Parse error")
                 }
             }
+
+            self.token_location = token.location
 
             if token.type == .Newline && .Newlines_Are_Whitespace in self.flags {
                 token.type = .Whitespace
@@ -192,7 +198,7 @@ package kdl
                     self.flags += {.Contextually_Illegal_Whitespace}
                 }
                 if self.emit_comments {
-                    self.event = Event{type = .Comment, value = Value{variant = token.value}}
+                    self.event = Event{type = .Comment, value = Value{variant = token.value}, location = token.location}
                     return self.event
                 }
                 // else: comments are not emitted, get the next token
@@ -242,7 +248,7 @@ package kdl
 
     @(private)
     parser__set_parse_error :: proc(self: ^Parser, message: string) -> Event {
-        self.event = Event{type = .Parse_Error, value = Value{variant = message}}
+        self.event = Event{type = .Parse_Error, value = Value{variant = message}, location = self.token_location}
         return self.event
     }
 
@@ -334,7 +340,7 @@ package kdl
 
             self.base_state = .In_Node
             self.flags = {.Whitespace_Required}
-            self.event = Event{type = .Start_Node, name = name, value = Value{type_annotation = type_annotation}}
+            self.event = Event{type = .Start_Node, name = name, value = Value{type_annotation = type_annotation}, location = token.location}
             self.depth += 1
             return parser__apply_slashdash(self)
 
@@ -406,7 +412,7 @@ package kdl
             // not in a property: emit as an argument
             self.tmp_string_value = self.waiting_prop_name
             self.waiting_prop_name = ""
-            self.event = Event{type = .Argument, value = Value{variant = self.tmp_string_value}}
+            self.event = Event{type = .Argument, value = Value{variant = self.tmp_string_value}, location = self.waiting_prop_location}
 
             emit = parser__apply_slashdash(self)
 
@@ -441,7 +447,7 @@ package kdl
             self.flags = {}
             self.depth -= 1
             if self.child_block_at_depth > self.depth do self.child_block_at_depth = -1
-            self.event = Event{type = .End_Node}
+            self.event = Event{type = .End_Node, location = token.location}
             return parser__apply_slashdash(self)
         }
 
@@ -483,6 +489,7 @@ package kdl
             // Can this be a property key?
             if self.waiting_type_annotation == nil && .In_Property not_in self.flags && is_string {
                 self.waiting_prop_name = self.tmp_string_value
+                self.waiting_prop_location = token.location
                 self.tmp_string_value = ""
                 self.flags += {.Maybe_In_Property}
                 return false
@@ -498,9 +505,9 @@ package kdl
                 if len(self.tmp_string_key) > 0 do delete(self.tmp_string_key, self.allocator)
                 self.tmp_string_key = self.waiting_prop_name
                 self.waiting_prop_name = ""
-                self.event = Event{type = .Property, name = self.tmp_string_key, value = ev_value}
+                self.event = Event{type = .Property, name = self.tmp_string_key, value = ev_value, location = self.waiting_prop_location}
             } else {
-                self.event = Event{type = .Argument, value = ev_value}
+                self.event = Event{type = .Argument, value = ev_value, location = token.location}
             }
             emit = parser__apply_slashdash(self)
             self.base_state = .In_Node

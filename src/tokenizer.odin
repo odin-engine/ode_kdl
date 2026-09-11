@@ -46,9 +46,17 @@ package kdl
         Whitespace,           // any regular whitespace
     }
 
+    // Source position; line and column are 1-based, column counts code points.
+    Location :: struct {
+        offset: int, // bytes from the start of the document
+        line:   int,
+        column: int,
+    }
+
     Token :: struct {
-        type:  Token_Type,
-        value: string,
+        type:     Token_Type,
+        value:    string,
+        location: Location, // where the token starts
     }
 
     Tokenizer_Status :: enum u8 {
@@ -66,16 +74,20 @@ package kdl
         reader:       io.Reader,     // zero Stream (procedure == nil) in string mode
         owned_buffer: [dynamic]byte, // backing storage in stream mode; nil in string mode
         allocator:    runtime.Allocator,
+        location:     Location,      // position of pos
+        after_cr:     bool,          // last consumed rune was CR, so a following LF is not a new line
     }
 
     tokenizer__init :: proc(self: ^Tokenizer, document: string) {
         self^ = Tokenizer{}
+        self.location = Location{line = 1, column = 1}
         self.document = transmute([]byte)document
         tokenizer__skip_bom(self)
     }
 
     tokenizer__init_stream :: proc(self: ^Tokenizer, reader: io.Reader, allocator := context.allocator) -> runtime.Allocator_Error {
         self^ = Tokenizer{}
+        self.location = Location{line = 1, column = 1}
         self.reader = reader
         self.allocator = allocator
         self.owned_buffer = make([dynamic]byte, 0, STREAM_REFILL_SIZE, allocator) or_return
@@ -116,6 +128,14 @@ package kdl
     }
 
     tokenizer__pop_token :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
+        start := self.location
+        token, status = tokenizer__pop_token_at(self)
+        token.location = start
+        return
+    }
+
+    @(private)
+    tokenizer__pop_token_at :: proc(self: ^Tokenizer) -> (token: Token, status: Tokenizer_Status) {
         c, cur, ustatus := tokenizer__get_char(self, 0)
         switch ustatus {
         case .OK:
@@ -188,7 +208,10 @@ package kdl
     @(private)
     tokenizer__skip_bom :: proc(self: ^Tokenizer) {
         c, next, status := tokenizer__get_char(self, 0)
-        if status == .OK && c == 0xFEFF do self.pos = next
+        if status == .OK && c == 0xFEFF {
+            self.pos = next
+            self.location.offset = next
+        }
     }
 
     // Byte-level, refill-aware "get next char" — the choke point every scan loop
@@ -217,8 +240,40 @@ package kdl
     @(private)
     tokenizer__take :: proc(self: ^Tokenizer, rel: int) -> string {
         value := tokenizer__slice(self, 0, rel)
-        self.pos += rel
+        tokenizer__advance(self, rel)
         return value
+    }
+
+    // Moves pos forward by rel bytes, updating the line/column counters.
+    @(private)
+    tokenizer__advance :: proc(self: ^Tokenizer, rel: int) {
+        end := self.pos + rel
+        for i := self.pos; i < end; {
+            r: rune
+            next := i + 1
+            if b := self.document[i]; b < 0x80 {
+                r = rune(b)
+            } else {
+                r2, next_abs, _ := peek_codepoint(self.document, i)
+                r = r2
+                if next_abs > i do next = next_abs
+            }
+
+            switch {
+            case r == '\n' && self.after_cr:
+                self.after_cr = false
+            case is_newline(r):
+                self.location.line += 1
+                self.location.column = 1
+                self.after_cr = r == '\r'
+            case:
+                self.location.column += 1
+                self.after_cr = false
+            }
+            i = next
+        }
+        self.location.offset += rel
+        self.pos = end
     }
 
     @(private)
@@ -323,7 +378,7 @@ package kdl
             if s3 == .EOF {
                 if !is_raw && initial_quote_count == 2 {
                     // "" followed immediately by EOF: an empty regular string
-                    self.pos += cur
+                    tokenizer__advance(self, cur)
                     return Token{type = .String, value = ""}, .OK
                 }
                 return {}, .Error
@@ -391,7 +446,7 @@ package kdl
         }
 
         value := tokenizer__slice(self, string_start, end_quote_offset)
-        self.pos += end_position
+        tokenizer__advance(self, end_position)
 
         tok_type: Token_Type
         switch {
