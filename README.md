@@ -124,7 +124,7 @@ odin build cmd/kdl_parse_events -out:cmd/kdl_parse_events/out/kdl_parse_events.e
 
 ## Scope
 
-This is a v2-only port of ckdl's core library — see `CLAUDE.md` for the full list of deliberate differences from upstream (no KDL v1, no C++/Python bindings).
+This is a v2-only port of ckdl's core library (no KDL v1, no C++/Python bindings).
 
 ## Testing
 
