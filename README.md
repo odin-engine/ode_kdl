@@ -9,7 +9,7 @@ Validated against the official upstream KDL 2.0.0 test suite (319 cases, vendore
 Clone into your project and import the `src` directory as `kdl`:
 
 ```sh
-git clone https://github.com/zm69/ode_kdl vendor/ode_kdl
+git clone https://github.com/odin-engine/ode_kdl vendor/ode_kdl
 ```
 
 ```odin
